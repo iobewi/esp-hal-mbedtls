@@ -1,0 +1,43 @@
+[package]
+name = "esp-hal-mbedtls"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "ESP HAL glue for mbedtls-rs with Embassy networking adapters"
+repository = "https://github.com/iobewi/esp-hal-mbedtls"
+readme = "README.md"
+keywords = ["esp32", "tls", "mbedtls", "embedded", "no-std"]
+categories = ["embedded", "network-programming", "no-std"]
+
+[features]
+default = []
+esp32c3 = ["esp-hal/esp32c3"]
+esp32s3 = ["esp-hal/esp32s3"]
+embassy-net = ["dep:embassy-net"]
+picoserve = ["embassy-net", "dep:embassy-sync", "dep:picoserve"]
+
+[dependencies]
+esp-hal = { version = "~1.1.0", default-features = false, features = ["unstable"] }
+embassy-time = { version = "0.5.0", default-features = false }
+rand_core = { version = "0.10.1", default-features = false }
+static_cell = "2.1.1"
+log = { version = "0.4.29", default-features = false }
+
+embassy-net = { version = "0.9.1", default-features = false, features = ["dns", "medium-ethernet", "tcp"], optional = true }
+embassy-sync = { version = "0.8.0", optional = true }
+picoserve = { version = "0.20.0", default-features = false, features = ["embassy", "alloc"], optional = true }
+
+mbedtls-rs = { version = "0.3.0", default-features = false, features = [
+  "tls-core", "tls-client", "tls-server",
+  "tls-proto-tls12", "tls-proto-tls13",
+  "x509-parse", "pk", "pem-parse", "base64",
+  "alg-sha256", "alg-sha512", "alg-hkdf",
+  "alg-ecp", "alg-ecdh", "alg-ecdsa", "curve-secp256r1",
+  "alg-gcm", "alg-chacha20", "alg-chachapoly", "alg-aes", "cipher-mode-cbc",
+  "kex-ecdhe-ecdsa",
+  "drbg-ctr", "entropy",
+  "tls-debug",
+  "hook-wall-clock",
+  "ssl-in-content-len-16384", "ssl-out-content-len-2048",
+] }
