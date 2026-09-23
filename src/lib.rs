@@ -17,19 +17,27 @@ extern crate alloc;
 //! It deliberately does not own certificate persistence, application NVS
 //! layout, SNTP policy, HTTP routes, or reconnect orchestration.
 
-use alloc::boxed::Box;
 use alloc::ffi::CString;
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
+use alloc::boxed::Box;
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 use core::convert::Infallible;
-
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 use esp_hal::rng::Rng;
-use mbedtls_rs::sys::hook::timer::{hook_timer, MbedtlsTimer};
-use mbedtls_rs::sys::hook::wall_clock::{hook_wall_clock, MbedtlsWallClock};
-use mbedtls_rs::sys::{mbedtls_ms_time_t, tm};
-use mbedtls_rs::{
-    Certificate, Credentials, PrivateKey, ServerSessionConfig, SessionConfig, Tls, TlsReference, X509,
-};
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 use rand_core::{TryCryptoRng, TryRng};
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 use static_cell::StaticCell;
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
+use mbedtls_rs::sys::hook::timer::{hook_timer, MbedtlsTimer};
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
+use mbedtls_rs::sys::hook::wall_clock::{hook_wall_clock, MbedtlsWallClock};
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
+use mbedtls_rs::sys::mbedtls_ms_time_t;
+use mbedtls_rs::sys::tm;
+use mbedtls_rs::{Certificate, Credentials, PrivateKey, ServerSessionConfig, SessionConfig, TlsReference, X509};
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
+use mbedtls_rs::Tls;
 
 /// Function used by MbedTLS to obtain Unix epoch seconds.
 ///
@@ -38,20 +46,24 @@ pub type UnixTimeFn = fn() -> Option<u64>;
 
 /// ESP hardware RNG adapter carrying the cryptographic RNG marker required by
 /// `mbedtls-rs`.
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 pub struct EspCryptoRng(Rng);
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 impl EspCryptoRng {
     pub fn new() -> Self {
         Self(Rng::new())
     }
 }
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 impl Default for EspCryptoRng {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 impl TryRng for EspCryptoRng {
     type Error = Infallible;
 
@@ -71,29 +83,38 @@ impl TryRng for EspCryptoRng {
     }
 }
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 impl TryCryptoRng for EspCryptoRng {}
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 struct WallClock {
     now: UnixTimeFn,
 }
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 impl MbedtlsWallClock for WallClock {
     fn instant(&self) -> Option<tm> {
         epoch_to_tm((self.now)()?)
     }
 }
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 struct UptimeTimer;
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 impl MbedtlsTimer for UptimeTimer {
     fn now(&self) -> mbedtls_ms_time_t {
         embassy_time::Instant::now().as_millis() as mbedtls_ms_time_t
     }
 }
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 static TIMER: UptimeTimer = UptimeTimer;
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 static WALL_CLOCK: StaticCell<WallClock> = StaticCell::new();
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 static RNG: StaticCell<EspCryptoRng> = StaticCell::new();
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 static TLS: StaticCell<Tls<'static>> = StaticCell::new();
 
 /// Named alias convenient for long-lived application structs.
@@ -104,6 +125,7 @@ pub type TlsReferenceStatic = TlsReference<'static>;
 /// This must be called exactly once, before any MbedTLS session is created.
 /// `now` may return `None` until the application has synchronized its wall
 /// clock; X.509 validity checks then fail closed.
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 pub fn init(now: UnixTimeFn) -> TlsReferenceStatic {
     let wall_clock = WALL_CLOCK.init(WallClock { now });
 
@@ -154,6 +176,7 @@ pub fn epoch_to_tm(epoch: u64) -> Option<tm> {
     })
 }
 
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 unsafe extern "C" fn mbedtls_rng(
     _ctx: *mut core::ffi::c_void,
     out: *mut u8,
@@ -174,6 +197,7 @@ pub enum PairError {
 
 /// Parses the leaf certificate and private key and verifies that they form a
 /// pair. No persistence is performed.
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 pub fn validate_cert_key_pair(cert_pem: &str, key_pem: &str) -> Result<(), PairError> {
     use mbedtls_rs::sys::{
         mbedtls_pk_check_pair, mbedtls_pk_context, mbedtls_pk_free, mbedtls_pk_init, mbedtls_pk_parse_key,
