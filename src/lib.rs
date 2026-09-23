@@ -1,7 +1,5 @@
 #![no_std]
 
-extern crate alloc;
-
 //! Small integration layer between `esp-hal` and `mbedtls-rs`.
 //!
 //! The crate owns reusable transport mechanics only:
@@ -16,6 +14,8 @@ extern crate alloc;
 //!
 //! It deliberately does not own certificate persistence, application NVS
 //! layout, SNTP policy, HTTP routes, or reconnect orchestration.
+
+extern crate alloc;
 
 use alloc::ffi::CString;
 #[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
