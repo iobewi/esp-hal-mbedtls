@@ -1,0 +1,25 @@
+name: Rust
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+      - run: cargo test --no-default-features
+
+  check-esp32c3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: riscv32imc-unknown-none-elf
+          components: rust-src
+      - run: cargo check --features esp32c3,picoserve --target riscv32imc-unknown-none-elf
