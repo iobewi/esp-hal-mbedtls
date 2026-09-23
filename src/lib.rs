@@ -17,6 +17,8 @@
 
 extern crate alloc;
 
+pub use mbedtls_rs;
+
 use alloc::ffi::CString;
 #[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 use alloc::boxed::Box;
