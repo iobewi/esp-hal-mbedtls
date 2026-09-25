@@ -291,8 +291,8 @@ pub fn generate_self_signed_identity(
     common_name: &str,
 ) -> Result<GeneratedIdentity, IdentityGenerationError> {
     use mbedtls_rs::sys::{
-        mbedtls_md_type_t_MBEDTLS_MD_SHA256, mbedtls_pk_context, mbedtls_pk_free,
-        mbedtls_pk_init, mbedtls_pk_setup_opaque, mbedtls_pk_write_key_pem,
+        mbedtls_md_type_t_MBEDTLS_MD_SHA256, mbedtls_pk_context, mbedtls_pk_copy_from_psa,
+        mbedtls_pk_free, mbedtls_pk_init, mbedtls_pk_write_key_pem,
         mbedtls_x509write_cert, mbedtls_x509write_crt_free,
         mbedtls_x509write_crt_init, mbedtls_x509write_crt_pem,
         mbedtls_x509write_crt_set_basic_constraints,
@@ -309,11 +309,7 @@ pub fn generate_self_signed_identity(
     const PSA_ECC_FAMILY_SECP_R1: u16 = 0x12;
     const PSA_KEY_TYPE_ECC_KEY_PAIR_BASE: u16 = 0x7100;
     const PSA_KEY_USAGE_EXPORT: u32 = 0x0000_0001;
-    const PSA_KEY_USAGE_SIGN_HASH: u32 = 0x0000_1000;
-    const PSA_ALG_SHA_256: u32 = 0x0200_0009;
-    const PSA_ALG_ECDSA_BASE: u32 = 0x0600_0600;
     const KEY_TYPE: u16 = PSA_KEY_TYPE_ECC_KEY_PAIR_BASE | PSA_ECC_FAMILY_SECP_R1;
-    const SIGN_ALG: u32 = PSA_ALG_ECDSA_BASE | (PSA_ALG_SHA_256 & 0xff);
 
     struct Contexts {
         pk: Box<mbedtls_pk_context>,
@@ -354,9 +350,11 @@ pub fn generate_self_signed_identity(
         attributes.private_type = KEY_TYPE;
         attributes.private_bits = 256;
         attributes.private_lifetime = 0; // PSA_KEY_LIFETIME_VOLATILE
-        attributes.private_policy.private_usage =
-            PSA_KEY_USAGE_EXPORT | PSA_KEY_USAGE_SIGN_HASH;
-        attributes.private_policy.private_alg = SIGN_ALG;
+        // Export is the only policy needed here: the PSA key is copied into
+        // a normal MbedTLS PK context immediately below, after which signing
+        // the self-signed certificate no longer depends on the PSA policy.
+        attributes.private_policy.private_usage = PSA_KEY_USAGE_EXPORT;
+        attributes.private_policy.private_alg = 0;
         attributes.private_policy.private_alg2 = 0;
         attributes.private_id = 0;
 
@@ -366,7 +364,7 @@ pub fn generate_self_signed_identity(
         }
 
         mbedtls_pk_init(&mut *ctx.pk);
-        let rc = mbedtls_pk_setup_opaque(&mut *ctx.pk, ctx.key_id);
+        let rc = mbedtls_pk_copy_from_psa(ctx.key_id, &mut *ctx.pk);
         if rc != 0 {
             return Err(IdentityGenerationError::KeySetup(rc));
         }
@@ -396,7 +394,7 @@ pub fn generate_self_signed_identity(
         serial[0] |= 0x01;
         setup(mbedtls_x509write_crt_set_serial_raw(
             &mut *ctx.crt,
-            serial.as_ptr(),
+            serial.as_mut_ptr(),
             serial.len(),
         ))?;
 
