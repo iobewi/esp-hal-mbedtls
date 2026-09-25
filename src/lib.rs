@@ -261,20 +261,25 @@ pub fn validate_cert_key_pair(cert_pem: &str, key_pem: &str) -> Result<(), PairE
 #[derive(Debug)]
 pub enum IdentityGenerationError {
     InvalidName,
-    KeySetup(i32),
+    PsaInit(i32),
     KeyGeneration(i32),
+    KeySetup(i32),
     KeyEncoding(i32),
     CertificateSetup(i32),
     CertificateEncoding(i32),
     InvalidUtf8,
 }
 
-/// Fresh P-256 server identity generated entirely from the ESP hardware RNG.
+/// Fresh P-256 server identity generated locally.
 ///
-/// This is deliberately a transport/crypto primitive only: the caller owns
-/// persistence, lifecycle policy and trust/enrollment. The certificate is
-/// self-signed and uses a wide fixed validity interval so identity creation
-/// can happen before the device has network time.
+/// The key is created as a volatile PSA key, wrapped by MbedTLS only for
+/// certificate construction/export, then destroyed after its PEM form has
+/// been produced. This crate deliberately does not persist it: persistence,
+/// lifecycle and enrollment are application policy.
+///
+/// The self-signed certificate uses a deliberately wide fixed validity
+/// window because bootstrap identity creation can happen before networking
+/// and therefore before the application has synchronized a wall clock.
 #[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
 pub struct GeneratedIdentity {
     pub cert_pem: alloc::string::String,
@@ -286,31 +291,46 @@ pub fn generate_self_signed_identity(
     common_name: &str,
 ) -> Result<GeneratedIdentity, IdentityGenerationError> {
     use mbedtls_rs::sys::{
-        mbedtls_ecp_gen_key, mbedtls_ecp_group_id_MBEDTLS_ECP_DP_SECP256R1,
-        mbedtls_ecp_keypair, mbedtls_md_type_t_MBEDTLS_MD_SHA256,
-        mbedtls_pk_context, mbedtls_pk_free, mbedtls_pk_info_from_type,
-        mbedtls_pk_init, mbedtls_pk_setup, mbedtls_pk_type_t_MBEDTLS_PK_ECKEY,
-        mbedtls_pk_write_key_pem, mbedtls_x509write_cert,
-        mbedtls_x509write_crt_free, mbedtls_x509write_crt_init,
-        mbedtls_x509write_crt_pem, mbedtls_x509write_crt_set_basic_constraints,
+        mbedtls_md_type_t_MBEDTLS_MD_SHA256, mbedtls_pk_context, mbedtls_pk_free,
+        mbedtls_pk_init, mbedtls_pk_setup_opaque, mbedtls_pk_write_key_pem,
+        mbedtls_x509write_cert, mbedtls_x509write_crt_free,
+        mbedtls_x509write_crt_init, mbedtls_x509write_crt_pem,
+        mbedtls_x509write_crt_set_basic_constraints,
         mbedtls_x509write_crt_set_issuer_key, mbedtls_x509write_crt_set_issuer_name,
         mbedtls_x509write_crt_set_md_alg, mbedtls_x509write_crt_set_serial_raw,
         mbedtls_x509write_crt_set_subject_key, mbedtls_x509write_crt_set_subject_name,
-        mbedtls_x509write_crt_set_validity,
+        mbedtls_x509write_crt_set_validity, psa_crypto_init, psa_destroy_key,
+        psa_generate_key, psa_key_attributes_t,
     };
+
+    // PSA encodings from the PSA Crypto specification. They are macros in C,
+    // so bindgen does not expose constructors for them.
+    const PSA_SUCCESS: i32 = 0;
+    const PSA_ECC_FAMILY_SECP_R1: u16 = 0x12;
+    const PSA_KEY_TYPE_ECC_KEY_PAIR_BASE: u16 = 0x7100;
+    const PSA_KEY_USAGE_EXPORT: u32 = 0x0000_0001;
+    const PSA_KEY_USAGE_SIGN_HASH: u32 = 0x0000_1000;
+    const PSA_ALG_SHA_256: u32 = 0x0200_0009;
+    const PSA_ALG_ECDSA_BASE: u32 = 0x0600_0600;
+    const KEY_TYPE: u16 = PSA_KEY_TYPE_ECC_KEY_PAIR_BASE | PSA_ECC_FAMILY_SECP_R1;
+    const SIGN_ALG: u32 = PSA_ALG_ECDSA_BASE | (PSA_ALG_SHA_256 & 0xff);
 
     struct Contexts {
         pk: Box<mbedtls_pk_context>,
         crt: Box<mbedtls_x509write_cert>,
+        key_id: u32,
     }
 
     impl Drop for Contexts {
         fn drop(&mut self) {
-            // SAFETY: both contexts are initialized exactly once below and
-            // remain owned by this guard until they are freed here.
+            // SAFETY: contexts were initialized below; an all-zero key id is
+            // never a valid PSA key and is ignored.
             unsafe {
                 mbedtls_x509write_crt_free(&mut *self.crt);
                 mbedtls_pk_free(&mut *self.pk);
+                if self.key_id != 0 {
+                    let _ = psa_destroy_key(self.key_id);
+                }
             }
         }
     }
@@ -320,39 +340,38 @@ pub fn generate_self_signed_identity(
     let mut ctx = Contexts {
         pk: Box::default(),
         crt: Box::default(),
+        key_id: 0,
     };
 
-    // SAFETY: fresh zeroed contexts, valid pointers and the ESP hardware RNG
-    // callback. The PK context owns the allocated EC key until Drop.
+    // SAFETY: all calls receive initialized contexts and valid buffers.
     unsafe {
-        mbedtls_pk_init(&mut *ctx.pk);
-        mbedtls_x509write_crt_init(&mut *ctx.crt);
-
-        let info = mbedtls_pk_info_from_type(mbedtls_pk_type_t_MBEDTLS_PK_ECKEY);
-        if info.is_null() {
-            return Err(IdentityGenerationError::KeySetup(-1));
+        let rc = psa_crypto_init();
+        if rc != PSA_SUCCESS {
+            return Err(IdentityGenerationError::PsaInit(rc));
         }
-        let rc = mbedtls_pk_setup(&mut *ctx.pk, info);
+
+        let mut attributes = psa_key_attributes_t::default();
+        attributes.private_type = KEY_TYPE;
+        attributes.private_bits = 256;
+        attributes.private_lifetime = 0; // PSA_KEY_LIFETIME_VOLATILE
+        attributes.private_policy.private_usage =
+            PSA_KEY_USAGE_EXPORT | PSA_KEY_USAGE_SIGN_HASH;
+        attributes.private_policy.private_alg = SIGN_ALG;
+        attributes.private_policy.private_alg2 = 0;
+        attributes.private_id = 0;
+
+        let rc = psa_generate_key(&attributes, &mut ctx.key_id);
+        if rc != PSA_SUCCESS || ctx.key_id == 0 {
+            return Err(IdentityGenerationError::KeyGeneration(rc));
+        }
+
+        mbedtls_pk_init(&mut *ctx.pk);
+        let rc = mbedtls_pk_setup_opaque(&mut *ctx.pk, ctx.key_id);
         if rc != 0 {
             return Err(IdentityGenerationError::KeySetup(rc));
         }
 
-        let ec = ctx.pk.pk_ctx.cast::<mbedtls_ecp_keypair>();
-        let rc = mbedtls_ecp_gen_key(
-            mbedtls_ecp_group_id_MBEDTLS_ECP_DP_SECP256R1,
-            ec,
-            Some(mbedtls_rng),
-            core::ptr::null_mut(),
-        );
-        if rc != 0 {
-            return Err(IdentityGenerationError::KeyGeneration(rc));
-        }
-
-        let mut serial = [0u8; 16];
-        Rng::new().read(&mut serial);
-        serial[0] &= 0x7f;
-        serial[0] |= 0x01;
-
+        mbedtls_x509write_crt_init(&mut *ctx.crt);
         let mut setup = |rc: i32| {
             if rc == 0 {
                 Ok(())
@@ -360,15 +379,27 @@ pub fn generate_self_signed_identity(
                 Err(IdentityGenerationError::CertificateSetup(rc))
             }
         };
-        setup(mbedtls_x509write_crt_set_subject_name(&mut *ctx.crt, subject.as_ptr()))?;
-        setup(mbedtls_x509write_crt_set_issuer_name(&mut *ctx.crt, subject.as_ptr()))?;
+        setup(mbedtls_x509write_crt_set_subject_name(
+            &mut *ctx.crt,
+            subject.as_ptr(),
+        ))?;
+        setup(mbedtls_x509write_crt_set_issuer_name(
+            &mut *ctx.crt,
+            subject.as_ptr(),
+        ))?;
         mbedtls_x509write_crt_set_subject_key(&mut *ctx.crt, &mut *ctx.pk);
         mbedtls_x509write_crt_set_issuer_key(&mut *ctx.crt, &mut *ctx.pk);
+
+        let mut serial = [0u8; 16];
+        Rng::new().read(&mut serial);
+        serial[0] &= 0x7f;
+        serial[0] |= 0x01;
         setup(mbedtls_x509write_crt_set_serial_raw(
             &mut *ctx.crt,
             serial.as_ptr(),
             serial.len(),
         ))?;
+
         setup(mbedtls_x509write_crt_set_validity(
             &mut *ctx.crt,
             c"20260101000000".as_ptr(),
@@ -385,7 +416,11 @@ pub fn generate_self_signed_identity(
         ))?;
 
         let mut key_buf = [0u8; 1024];
-        let rc = mbedtls_pk_write_key_pem(&*ctx.pk, key_buf.as_mut_ptr(), key_buf.len());
+        let rc = mbedtls_pk_write_key_pem(
+            &*ctx.pk,
+            key_buf.as_mut_ptr(),
+            key_buf.len(),
+        );
         if rc != 0 {
             return Err(IdentityGenerationError::KeyEncoding(rc));
         }

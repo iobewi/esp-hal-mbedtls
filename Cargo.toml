@@ -30,7 +30,7 @@ picoserve = { version = "0.20.0", default-features = false, features = ["embassy
 mbedtls-rs = { version = "0.3.0", default-features = false, features = [
   "tls-core", "tls-client", "tls-server",
   "tls-proto-tls12", "tls-proto-tls13",
-  "x509-parse", "pk", "pem-parse", "base64",
+  "x509-parse", "x509-write", "pk", "pem-parse", "pem-write", "base64",
   "alg-sha256", "alg-sha512", "alg-hkdf",
   "alg-ecp", "alg-ecdh", "alg-ecdsa", "curve-secp256r1",
   "alg-gcm", "alg-chacha20", "alg-chachapoly", "alg-aes", "cipher-mode-cbc",
