@@ -256,6 +256,168 @@ pub fn validate_cert_key_pair(cert_pem: &str, key_pem: &str) -> Result<(), PairE
     Ok(())
 }
 
+
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
+#[derive(Debug)]
+pub enum IdentityGenerationError {
+    InvalidName,
+    KeySetup(i32),
+    KeyGeneration(i32),
+    KeyEncoding(i32),
+    CertificateSetup(i32),
+    CertificateEncoding(i32),
+    InvalidUtf8,
+}
+
+/// Fresh P-256 server identity generated entirely from the ESP hardware RNG.
+///
+/// This is deliberately a transport/crypto primitive only: the caller owns
+/// persistence, lifecycle policy and trust/enrollment. The certificate is
+/// self-signed and uses a wide fixed validity interval so identity creation
+/// can happen before the device has network time.
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
+pub struct GeneratedIdentity {
+    pub cert_pem: alloc::string::String,
+    pub key_pem: alloc::string::String,
+}
+
+#[cfg(any(feature = "esp32c3", feature = "esp32s3"))]
+pub fn generate_self_signed_identity(
+    common_name: &str,
+) -> Result<GeneratedIdentity, IdentityGenerationError> {
+    use mbedtls_rs::sys::{
+        mbedtls_ecp_gen_key, mbedtls_ecp_group_id_MBEDTLS_ECP_DP_SECP256R1,
+        mbedtls_ecp_keypair, mbedtls_md_type_t_MBEDTLS_MD_SHA256,
+        mbedtls_pk_context, mbedtls_pk_free, mbedtls_pk_info_from_type,
+        mbedtls_pk_init, mbedtls_pk_setup, mbedtls_pk_type_t_MBEDTLS_PK_ECKEY,
+        mbedtls_pk_write_key_pem, mbedtls_x509write_cert,
+        mbedtls_x509write_crt_free, mbedtls_x509write_crt_init,
+        mbedtls_x509write_crt_pem, mbedtls_x509write_crt_set_basic_constraints,
+        mbedtls_x509write_crt_set_issuer_key, mbedtls_x509write_crt_set_issuer_name,
+        mbedtls_x509write_crt_set_md_alg, mbedtls_x509write_crt_set_serial_raw,
+        mbedtls_x509write_crt_set_subject_key, mbedtls_x509write_crt_set_subject_name,
+        mbedtls_x509write_crt_set_validity,
+    };
+
+    struct Contexts {
+        pk: Box<mbedtls_pk_context>,
+        crt: Box<mbedtls_x509write_cert>,
+    }
+
+    impl Drop for Contexts {
+        fn drop(&mut self) {
+            // SAFETY: both contexts are initialized exactly once below and
+            // remain owned by this guard until they are freed here.
+            unsafe {
+                mbedtls_x509write_crt_free(&mut *self.crt);
+                mbedtls_pk_free(&mut *self.pk);
+            }
+        }
+    }
+
+    let subject = alloc::format!("CN={common_name}");
+    let subject = CString::new(subject).map_err(|_| IdentityGenerationError::InvalidName)?;
+    let mut ctx = Contexts {
+        pk: Box::default(),
+        crt: Box::default(),
+    };
+
+    // SAFETY: fresh zeroed contexts, valid pointers and the ESP hardware RNG
+    // callback. The PK context owns the allocated EC key until Drop.
+    unsafe {
+        mbedtls_pk_init(&mut *ctx.pk);
+        mbedtls_x509write_crt_init(&mut *ctx.crt);
+
+        let info = mbedtls_pk_info_from_type(mbedtls_pk_type_t_MBEDTLS_PK_ECKEY);
+        if info.is_null() {
+            return Err(IdentityGenerationError::KeySetup(-1));
+        }
+        let rc = mbedtls_pk_setup(&mut *ctx.pk, info);
+        if rc != 0 {
+            return Err(IdentityGenerationError::KeySetup(rc));
+        }
+
+        let ec = ctx.pk.pk_ctx.cast::<mbedtls_ecp_keypair>();
+        let rc = mbedtls_ecp_gen_key(
+            mbedtls_ecp_group_id_MBEDTLS_ECP_DP_SECP256R1,
+            ec,
+            Some(mbedtls_rng),
+            core::ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(IdentityGenerationError::KeyGeneration(rc));
+        }
+
+        let mut serial = [0u8; 16];
+        Rng::new().read(&mut serial);
+        serial[0] &= 0x7f;
+        serial[0] |= 0x01;
+
+        let mut setup = |rc: i32| {
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(IdentityGenerationError::CertificateSetup(rc))
+            }
+        };
+        setup(mbedtls_x509write_crt_set_subject_name(&mut *ctx.crt, subject.as_ptr()))?;
+        setup(mbedtls_x509write_crt_set_issuer_name(&mut *ctx.crt, subject.as_ptr()))?;
+        mbedtls_x509write_crt_set_subject_key(&mut *ctx.crt, &mut *ctx.pk);
+        mbedtls_x509write_crt_set_issuer_key(&mut *ctx.crt, &mut *ctx.pk);
+        setup(mbedtls_x509write_crt_set_serial_raw(
+            &mut *ctx.crt,
+            serial.as_ptr(),
+            serial.len(),
+        ))?;
+        setup(mbedtls_x509write_crt_set_validity(
+            &mut *ctx.crt,
+            c"20260101000000".as_ptr(),
+            c"20991231235959".as_ptr(),
+        ))?;
+        mbedtls_x509write_crt_set_md_alg(
+            &mut *ctx.crt,
+            mbedtls_md_type_t_MBEDTLS_MD_SHA256,
+        );
+        setup(mbedtls_x509write_crt_set_basic_constraints(
+            &mut *ctx.crt,
+            0,
+            -1,
+        ))?;
+
+        let mut key_buf = [0u8; 1024];
+        let rc = mbedtls_pk_write_key_pem(&*ctx.pk, key_buf.as_mut_ptr(), key_buf.len());
+        if rc != 0 {
+            return Err(IdentityGenerationError::KeyEncoding(rc));
+        }
+
+        let mut cert_buf = [0u8; 2048];
+        let rc = mbedtls_x509write_crt_pem(
+            &mut *ctx.crt,
+            cert_buf.as_mut_ptr(),
+            cert_buf.len(),
+            Some(mbedtls_rng),
+            core::ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(IdentityGenerationError::CertificateEncoding(rc));
+        }
+
+        fn pem_string(
+            buf: &[u8],
+        ) -> Result<alloc::string::String, IdentityGenerationError> {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            let text = core::str::from_utf8(&buf[..end])
+                .map_err(|_| IdentityGenerationError::InvalidUtf8)?;
+            Ok(alloc::string::String::from(text))
+        }
+
+        Ok(GeneratedIdentity {
+            cert_pem: pem_string(&cert_buf)?,
+            key_pem: pem_string(&key_buf)?,
+        })
+    }
+}
+
 /// Builds a server-side MbedTLS session configuration from a PEM pair.
 pub fn server_config_from_pem(cert_pem: &str, key_pem: &str) -> Result<SessionConfig<'static>, ()> {
     let cert_c = CString::new(cert_pem).map_err(|_| ())?;
