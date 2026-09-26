@@ -13,7 +13,19 @@ categories = ["embedded", "network-programming", "no-std"]
 [features]
 default = []
 esp32c3 = ["dep:esp-hal", "dep:rand_core", "dep:static_cell", "esp-hal/esp32c3"]
-esp32s3 = ["dep:esp-hal", "dep:rand_core", "dep:static_cell", "esp-hal/esp32s3"]
+# `use-gcc` is NOT enabled for ESP32-C3: mbedtls-rs-sys defaults to clang there
+# and that already works (a standard-shaped riscv32 triple isn't affected by
+# the bug below). ESP32-S3 needs it: mbedtls-rs-sys's default clang path
+# calls cmake-rs's `Config::target()` with the raw Xtensa Rust target triple
+# ("xtensa-esp32s3-none-elf"), which cmake-rs mis-parses into a bogus,
+# duplicate `--target=` C flag ("xtensa-none-elf", later rejected by clang as
+# "unknown target triple 'xtensa-none-unknown-elf'") -- a documented cmake-rs
+# limitation with non-standard/4-component triples, not anything wrong with
+# the MbedTLS build itself. `use-gcc` takes mbedtls-rs-sys's other code path
+# (`derive_forced_c_compiler`), which for this target selects the real
+# `xtensa-esp32s3-elf-gcc` cross-compiler directly and never calls
+# `Config::target()` with the problematic triple at all.
+esp32s3 = ["dep:esp-hal", "dep:rand_core", "dep:static_cell", "esp-hal/esp32s3", "mbedtls-rs/use-gcc"]
 embassy-net = ["dep:embassy-net"]
 picoserve = ["embassy-net", "dep:embassy-sync", "dep:picoserve"]
 
